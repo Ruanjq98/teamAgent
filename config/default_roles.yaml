@@ -1,0 +1,91 @@
+# ============================================================
+# teamAgent 角色配置文件
+# ============================================================
+# 此文件定义三个角色的系统提示词、工具集、模型等。
+# 用户可以通过修改此文件自定义角色行为，无需修改代码。
+# ============================================================
+
+# 全局设置
+global:
+  # 对话最大轮次
+  max_turns: 50
+  # 最大迭代次数
+  max_iterations: 20
+  # 终止信号
+  termination_signal: "任务完成"
+  # 合并方式: squash | merge | rebase
+  merge_method: squash
+  # 分支命名前缀
+  branch_prefix: "feature/"
+
+# ============================================================
+# 开发经理配置
+# ============================================================
+manager:
+  name: "开发经理"
+  description: "负责需求澄清、任务拆解、迭代评估和项目收尾"
+  model: default  # default 表示使用全局模型
+  # 系统提示词（若不指定则使用 config/prompts/manager_system.md）
+  system_prompt_file: config/prompts/manager_system.md
+  # 可用工具列表（若不指定则使用默认工具集）
+  tools:
+    - create_issue
+    - comment_on_issue
+    - close_issue
+    - get_issue
+    - list_issues
+    - add_labels_to_issue
+    - get_pull_request
+    - list_pull_requests
+    - submit_pr_review
+    - merge_pull_request
+
+# ============================================================
+# 开发人员配置
+# ============================================================
+developer:
+  name: "开发人员"
+  description: "负责领取 Issue、编码实现、创建 PR"
+  model: default
+  system_prompt_file: config/prompts/developer_system.md
+  tools:
+    - get_issue
+    - list_issues
+    - comment_on_issue
+    - clone_repository
+    - create_branch
+    - git_commit
+    - git_push
+    - get_current_branch
+    - get_git_status
+    - create_pull_request
+    - get_pull_request
+    - read_file
+    - write_file
+    - delete_file
+    - list_files
+    - run_command
+
+# ============================================================
+# 测试人员配置
+# ============================================================
+tester:
+  name: "测试人员"
+  description: "负责 PR 审查、代码测试、质量保障"
+  model: default
+  system_prompt_file: config/prompts/tester_system.md
+  tools:
+    - get_issue
+    - list_issues
+    - comment_on_issue
+    - create_issue
+    - clone_repository
+    - fetch_pr_branch
+    - get_current_branch
+    - get_git_status
+    - list_pull_requests
+    - get_pull_request
+    - submit_pr_review
+    - read_file
+    - list_files
+    - run_command

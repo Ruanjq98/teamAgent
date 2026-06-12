@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+
+# 环境变量（包含敏感信息）
+.env
+!.env.template
+
+# 工作目录（Agent 克隆的仓库）
+.workspace/
+
+# 日志
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*~
+reports/*.md
+reports/*.html
+!reports/.gitkeep
