@@ -22,6 +22,7 @@ class Settings:
     github_token: str = os.getenv("GITHUB_TOKEN", "")
     github_repo_owner: str = os.getenv("GITHUB_REPO_OWNER", "")
     github_repo_name: str = os.getenv("GITHUB_REPO_NAME", "")
+    github_verify_ssl: bool = os.getenv("GITHUB_VERIFY_SSL", "true").lower() == "true"
 
     @property
     def github_repo_full(self) -> str:

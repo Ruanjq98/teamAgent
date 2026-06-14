@@ -222,23 +222,34 @@ class WorkflowPipeline:
 重要: 现在只做需求澄清，不要创建子 Issue，不要进入开发流程。
 """
 
-        await Console(manager.run_stream(task=clarification_task))
+        # 运行经理并捕获 create_issue 的返回值，从中提取 Issue 编号
+        parent_issue_number = None
+        try:
+            async for msg in manager.run_stream(task=clarification_task):
+                # 从 ToolCallExecutionEvent 中提取 create_issue 的结果
+                content_list = getattr(msg, "content", None)
+                if isinstance(content_list, list):
+                    for item in content_list:
+                        result_text = str(getattr(item, "content", ""))
+                        if "Issue 创建成功" in result_text:
+                            m = re.search(r'编号\s*#(\d+)', result_text)
+                            if m:
+                                parent_issue_number = int(m.group(1))
+                                logger.info(f"📝 捕获到父 Issue #{parent_issue_number}")
+                # 打印消息文本（保持用户可见输出）
+                if hasattr(msg, "to_text"):
+                    print(msg.to_text(), flush=True)
+        except Exception as e:
+            logger.warning(f"经理 Agent 对话中断: {e}")
+            if parent_issue_number:
+                logger.info(f"Issue #{parent_issue_number} 已创建，继续等待用户确认")
 
-        # 查找刚创建的父 Issue（最新带 needs-clarification 标签的 Issue）
-        issues_output = github_tools.list_issues(state="open", labels=["status/needs-clarification"])
-        match = re.search(r'#(\d+)', issues_output)
-        if not match:
-            # 回退：查所有 open issues
-            issues_output = github_tools.list_issues(state="open")
-            match = re.search(r'#(\d+)', issues_output)
-
-        if not match:
-            logger.error("❌ 无法找到父 Issue 编号")
+        if not parent_issue_number:
+            logger.error("❌ 无法从工具调用中提取父 Issue 编号")
             if self.audit:
-                self.audit.log_error("Pipeline", "issue_not_found", "无法在仓库中找到创建的父 Issue")
+                self.audit.log_error("Pipeline", "issue_not_found",
+                                     "create_issue 工具调用未返回编号")
             return False
-
-        parent_issue_number = int(match.group(1))
         self.parent_issue_number = parent_issue_number
 
         logger.info(f"📝 父 Issue #{parent_issue_number} 已创建")
@@ -259,20 +270,12 @@ class WorkflowPipeline:
         )
         self.clarification_timeout.record_user_reply()  # 从现在开始计时
 
-        bot_username = github_tools._get_bot_username()
-        logger.debug(f"Bot 用户名: '{bot_username}'")
-
-        # 建立评论基线
+        # 建立评论基线（不区分 bot/用户，跟踪所有评论）
         existing_comments = github_tools._get_issue_comments_raw(parent_issue_number)
-        last_user_comment_id = max(
-            (c["id"] for c in existing_comments if c["author"] != bot_username),
-            default=0,
+        last_known_comment_id = max(
+            (c["id"] for c in existing_comments), default=0
         )
-        last_bot_comment_id = max(
-            (c["id"] for c in existing_comments if c["author"] == bot_username),
-            default=0,
-        )
-        logger.debug(f"评论基线: user_id={last_user_comment_id}, bot_id={last_bot_comment_id}")
+        logger.info(f"📊 评论基线: 已有 {len(existing_comments)} 条评论, last_id={last_known_comment_id}")
 
         poll_interval = settings.clarification_poll_interval
         max_polls = settings.clarification_max_polls
@@ -315,26 +318,27 @@ class WorkflowPipeline:
                         )
                     return True
 
-                # B. 检测新用户评论
+                # B. 检测新评论（不区分作者——token 持有者和用户可能是同一人）
                 current_comments = github_tools._get_issue_comments_raw(parent_issue_number)
-                new_user_comments = [
+                new_comments = [
                     c for c in current_comments
-                    if c["author"] != bot_username and c["id"] > last_user_comment_id
+                    if c["id"] > last_known_comment_id
                 ]
 
-                if new_user_comments:
-                    logger.info(f"🔔 检测到 {len(new_user_comments)} 条新用户回复")
+                if new_comments:
+                    logger.info(f"🔔 检测到 {len(new_comments)} 条新评论: "
+                                f"{[c['author'] + ': ' + c['body'][:50] for c in new_comments]}")
                     self.clarification_timeout.record_user_reply()
-                    last_user_comment_id = max(c["id"] for c in new_user_comments)
+                    last_known_comment_id = max(c["id"] for c in new_comments)
 
                     if self.audit:
                         self.audit.log_event(
-                            "clarification_user_reply", "用户",
+                            "clarification_new_comment", "用户",
                             f"Issue #{parent_issue_number} 收到 "
-                            f"{len(new_user_comments)} 条新回复",
+                            f"{len(new_comments)} 条新评论",
                         )
 
-                    # 运行经理 Agent 评估用户回复
+                    # 运行经理 Agent 评估
                     confirmed = await self._run_clarification_evaluation(
                         parent_issue_number, requirement
                     )
@@ -342,16 +346,13 @@ class WorkflowPipeline:
                     if confirmed:
                         return True
 
-                    # 更新 Bot 评论基线（经理可能发布了追问）
+                    # 更新基线（经理可能发布了追问评论）
                     updated_comments = github_tools._get_issue_comments_raw(parent_issue_number)
-                    new_bot_ids = [
-                        c["id"] for c in updated_comments
-                        if c["author"] == bot_username and c["id"] > last_bot_comment_id
-                    ]
-                    if new_bot_ids:
-                        last_bot_comment_id = max(new_bot_ids)
+                    last_known_comment_id = max(
+                        (c["id"] for c in updated_comments), default=last_known_comment_id
+                    )
 
-                    logger.info("📝 开发经理已提出追问，继续等待用户回复...")
+                    logger.info(f"📝 开发经理已处理评论，继续等待... (last_id={last_known_comment_id})")
                     continue
 
                 # C. 超时处理
@@ -465,7 +466,14 @@ class WorkflowPipeline:
 """
 
         manager = create_manager_agent()
-        await Console(manager.run_stream(task=evaluation_prompt))
+        try:
+            await Console(manager.run_stream(task=evaluation_prompt))
+        except Exception as e:
+            logger.error(f"经理评估对话失败（API 错误）: {e}")
+            # API 出错时保守处理：检查标签状态，未确认则返回 False 继续等待
+            # 这样不会因为临时网络问题中断整个流程
+            confirmed = github_tools.issue_has_label(issue_number, "status/confirmed")
+            return confirmed
 
         # 检查经理是否已添加 confirmed 标签
         confirmed = github_tools.issue_has_label(issue_number, "status/confirmed")

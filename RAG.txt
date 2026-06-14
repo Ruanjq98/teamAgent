@@ -1,0 +1,58 @@
+【项目名称】 OpenRAG 平台
+
+【项目目标】
+构建一个支持多模型、多向量数据库、多 Embedding 模型的 RAG（检索增强生成）平台。用户可通过前端上传文档，系统自动切片、入库，然后通过问答接口基于文档内容生成答案。
+
+【核心功能清单】
+1. 前端界面：
+   - 提供文档上传功能（支持 PDF、Word、Markdown、TXT 等常见格式）
+   - 提供问答输入框，展示回答与引用来源
+2. 文档处理：
+   - 上传后自动解析文本，切片（支持可配置的切片大小和重叠）
+   - 调用 Embedding 模型对切片进行向量化
+   - 存入所选的向量数据库
+3. 检索与生成：
+   - 用户提问时，用问题向量检索向量数据库，返回 Top-K 相关文档片段
+   - 将检索片段与用户问题组装成提示词，发送给大语言模型生成回答
+   - 支持在回答中标注引用来源（文档名/片段编号）
+4. 多平台对接（通过配置可切换）：
+   - 大语言模型：支持 OpenAI、Claude、本地模型等（通过统一接口适配）
+   - Embedding 模型：支持 OpenAI Embedding、本地 Embedding（如 BGE、M3E 等）
+   - 向量数据库：支持 Chroma、Milvus、Pinecone、Weaviate、FAISS 等
+5. 通用功能：
+   - 多轮对话支持（携带历史记录）
+   - 日志、错误处理
+   - 环境变量配置
+
+【技术栈要求】
+- 后端：Python，框架用 FastAPI
+- 前端：简洁的单页应用，可使用 Vue/React 或纯 HTML+JS
+- 数据库：向量数据库（可配置），可选的关系数据库用于存储对话记录等元数据
+- 文档解析：推荐使用 Unstructured、PyPDF2、python-docx 等库
+- LLM 调用：使用 LiteLLM 或自行封装的适配器模式，支持统一调用多种 LLM
+- Embedding 调用：同样采用可插拔设计
+- 配置管理：通过 .env 或 YAML 配置文件切换模型和数据库
+
+【系统架构要求】
+- 采用模块化设计，每个功能（文档处理、Embedding、向量库、LLM 生成）作为独立模块，方便替换
+- 各组件接口抽象，例如：
+  - BaseEmbedder: embed(texts) -> List[List[float]]
+  - BaseVectorStore: add(embeddings, metadatas), search(query_embedding, top_k) -> List[Document]
+  - BaseLLM: generate(prompt) -> str
+- 使用依赖注入或工厂模式实现可配置性
+
+【API 接口设计】
+- POST /upload：上传文档，返回文档 ID
+- POST /chat：发送对话消息，请求体包含 { question, conversation_id (可选) }，返回 { answer, sources }
+- GET /documents：列出已上传文档
+- DELETE /documents/{id}：删除文档及其向量
+
+【工作流程】
+1. 用户上传文档 → 后端保存文件 → 解析文本 → 切片 → 向量化 → 存入默认或选定的向量数据库
+2. 用户提问 → 生成查询向量 → 向量数据库检索 → 获取 top-k 片段 → 填充提示词 → 调用 LLM → 返回答案及来源
+
+【其他要求】
+- 代码结构清晰，有 README 说明如何启动和配置
+- 关键模块要有单元测试
+- 请使用 Python 3.10+ 语法，类型标注完整
+- 注意异常处理，比如向量库连接失败、文档解析失败等

@@ -229,15 +229,11 @@ class TestPhaseClarification:
             assert result["status"] == "paused"
             assert "需求" in result["reason"]
 
-    @patch("autogen_agentchat.ui.Console")  # Mock Console to avoid message type issues
-    @patch("workflows.pipeline.github_tools.list_issues")
     @patch("workflows.pipeline.github_tools.issue_has_label")
     @patch("workflows.pipeline.github_tools._get_issue_comments_raw")
-    @patch("workflows.pipeline.github_tools._get_bot_username")
     @patch("workflows.pipeline.create_manager_agent")
     def test_clarification_confirmed_on_first_poll(
-        self, mock_create_mgr, mock_get_bot, mock_get_comments,
-        mock_has_label, mock_list_issues, mock_console,
+        self, mock_create_mgr, mock_get_comments, mock_has_label,
     ):
         """测试第一次轮询检测到 confirmed 标签直接返回 True。"""
         from workflows.pipeline import WorkflowPipeline
@@ -245,13 +241,22 @@ class TestPhaseClarification:
         pipeline = WorkflowPipeline()
         pipeline.audit = MagicMock()
 
-        mock_list_issues.return_value = "  - #1 | open | ... | [需求] Test | 负责人: 未分配"
         mock_has_label.return_value = True
         mock_get_comments.return_value = []
-        mock_get_bot.return_value = "test-bot"
+
+        # Mock stream with create_issue tool result containing issue number
+        class FakeCreateIssueResult:
+            content = "Issue 创建成功: https://github.com/o/r/issues/1 (编号 #1)"
+
+        class FakeMsg:
+            content = [FakeCreateIssueResult()]
+
+            def to_text(self):
+                return "Issue 创建成功: https://github.com/o/r/issues/1 (编号 #1)"
 
         async def mock_stream(task):
-            yield MagicMock()
+            yield FakeMsg()
+
         mock_manager = MagicMock()
         mock_manager.run_stream = mock_stream
         mock_create_mgr.return_value = mock_manager
@@ -262,32 +267,33 @@ class TestPhaseClarification:
             )
             assert result is True
 
-    @patch("autogen_agentchat.ui.Console")
-    @patch("workflows.pipeline.github_tools.list_issues")
     @patch("workflows.pipeline.github_tools.issue_has_label")
     @patch("workflows.pipeline.github_tools._get_issue_comments_raw")
-    @patch("workflows.pipeline.github_tools._get_bot_username")
     @patch("workflows.pipeline.create_manager_agent")
     def test_clarification_extracts_issue_number(
-        self, mock_create_mgr, mock_get_bot, mock_get_comments,
-        mock_has_label, mock_list_issues, mock_console,
+        self, mock_create_mgr, mock_get_comments, mock_has_label,
     ):
-        """测试 Issue 编号提取。"""
+        """测试 Issue 编号从工具调用结果中提取。"""
         from workflows.pipeline import WorkflowPipeline
 
         pipeline = WorkflowPipeline()
         pipeline.audit = MagicMock()
 
-        mock_list_issues.return_value = (
-            "仓库 o/r 的 Issues (state=open):\n"
-            "  - #42 | open | [type/question, status/needs-clarification] | Test | 负责人: 未分配"
-        )
         mock_has_label.return_value = True
         mock_get_comments.return_value = []
-        mock_get_bot.return_value = "test-bot"
+
+        class FakeCreateIssueResult:
+            content = "Issue 创建成功: https://github.com/o/r/issues/42 (编号 #42)"
+
+        class FakeMsg:
+            content = [FakeCreateIssueResult()]
+
+            def to_text(self):
+                return "Issue 创建成功: https://github.com/o/r/issues/42 (编号 #42)"
 
         async def mock_stream(task):
-            yield MagicMock()
+            yield FakeMsg()
+
         mock_manager = MagicMock()
         mock_manager.run_stream = mock_stream
         mock_create_mgr.return_value = mock_manager
@@ -299,16 +305,12 @@ class TestPhaseClarification:
             assert result is True
             assert pipeline.parent_issue_number == 42
 
-    @patch("autogen_agentchat.ui.Console")
-    @patch("workflows.pipeline.github_tools.list_issues")
     @patch("workflows.pipeline.github_tools.issue_has_label")
     @patch("workflows.pipeline.github_tools._get_issue_comments_raw")
-    @patch("workflows.pipeline.github_tools._get_bot_username")
     @patch("workflows.pipeline.github_tools.comment_on_issue")
     @patch("workflows.pipeline.create_manager_agent")
     def test_clarification_suspends_after_timeout(
-        self, mock_create_mgr, mock_comment, mock_get_bot,
-        mock_get_comments, mock_has_label, mock_list_issues, mock_console,
+        self, mock_create_mgr, mock_comment, mock_get_comments, mock_has_label,
     ):
         """测试超时后项目暂停。"""
         from workflows.pipeline import WorkflowPipeline
@@ -316,13 +318,21 @@ class TestPhaseClarification:
         pipeline = WorkflowPipeline()
         pipeline.audit = MagicMock()
 
-        mock_list_issues.return_value = "  - #1 | open | ... | Test | 负责人: 未分配"
         mock_has_label.return_value = False
         mock_get_comments.return_value = []
-        mock_get_bot.return_value = "test-bot"
+
+        class FakeCreateIssueResult:
+            content = "Issue 创建成功: https://github.com/o/r/issues/1 (编号 #1)"
+
+        class FakeMsg:
+            content = [FakeCreateIssueResult()]
+
+            def to_text(self):
+                return "Issue created"
 
         async def mock_stream(task):
-            yield MagicMock()
+            yield FakeMsg()
+
         mock_manager = MagicMock()
         mock_manager.run_stream = mock_stream
         mock_create_mgr.return_value = mock_manager
