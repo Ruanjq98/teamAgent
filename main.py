@@ -15,7 +15,18 @@ teamAgent — 基于 AutoGen 的多 Agent 项目开发团队
 """
 
 import asyncio
+import os
 import sys
+
+# 修复 Windows GBK 终端 Unicode 输出问题（务必在最前面设置）
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from loguru import logger
 
 from src.utils.logger import setup_logger
@@ -26,13 +37,13 @@ from src.utils.reporter import generate_markdown_report, generate_html_report
 def print_banner():
     """打印启动横幅。"""
     print("""
-╔══════════════════════════════════════════╗
-║         🤖 teamAgent v0.2.0              ║
-║   基于 AutoGen 的自动化开发团队            ║
-║                                          ║
-║   角色: 开发经理 | 开发人员 | 测试人员     ║
-║   通信: GitHub Issues                    ║
-╚══════════════════════════════════════════╝
++==========================================+
+|         teamAgent v0.2.0                 |
+|   基于 AutoGen 的自动化开发团队            |
+|                                          |
+|   角色: 开发经理 | 开发人员 | 测试人员     |
+|   通信: GitHub Issues                    |
++==========================================+
     """)
 
 

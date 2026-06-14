@@ -5,17 +5,14 @@
 结合 RoundRobinGroupChat 的固定轮转作为备选。
 """
 
-import asyncio
-from typing import Optional
 from autogen_agentchat.agents import AssistantAgent
-from autogen_agentchat.teams import SelectorGroupChat, RoundRobinGroupChat
+from autogen_agentchat.teams import RoundRobinGroupChat
 from autogen_agentchat.conditions import TextMentionTermination, MaxMessageTermination
 from autogen_agentchat.ui import Console
 
 from src.agents.manager_agent import create_manager_agent
 from src.agents.developer_agent import create_developer_agent
 from src.agents.tester_agent import create_tester_agent
-from src.models.model_client import create_model_client
 from config.settings import settings
 
 
@@ -27,24 +24,17 @@ class TeamOrchestrator:
     """
 
     def __init__(self):
-        self.manager: Optional[AssistantAgent] = None
-        self.developer: Optional[AssistantAgent] = None
-        self.tester: Optional[AssistantAgent] = None
-        self.team: Optional[SelectorGroupChat] = None
+        self.manager: None = None
+        self.developer: None = None
+        self.tester: None = None
+        self.team: None = None
 
     def setup(self):
         """创建所有 Agent 实例并配置团队。"""
-        # 三个 Agent 共用一个模型客户端
-        model_client = create_model_client()
-
+        # 每个 Agent 使用自己的模型客户端（不共享，避免 _model_client 覆盖问题）
         self.manager = create_manager_agent()
-        self.manager._model_client = model_client
-
         self.developer = create_developer_agent()
-        self.developer._model_client = model_client
-
         self.tester = create_tester_agent()
-        self.tester._model_client = model_client
 
         # 终止条件: 任务完成信号 OR 达到最大消息数
         termination = (
@@ -52,12 +42,10 @@ class TeamOrchestrator:
             | MaxMessageTermination(max_messages=settings.max_messages_per_round)
         )
 
-        # 使用 SelectorGroupChat — LLM 动态决定下一个发言的 Agent
-        self.team = SelectorGroupChat(
+        # 使用 RoundRobinGroupChat — 固定轮转（不依赖模型选择发言者）
+        self.team = RoundRobinGroupChat(
             participants=[self.manager, self.developer, self.tester],
-            model_client=model_client,
             termination_condition=termination,
-            allow_repeated_speaker=False,
             max_turns=settings.max_messages_per_round,
         )
 

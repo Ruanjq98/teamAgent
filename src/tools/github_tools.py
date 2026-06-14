@@ -225,7 +225,7 @@ URL: {issue.html_url}
 
 def list_issues(state: str = "open", labels: Optional[list[str]] = None) -> str:
     """
-    列出仓库中的 Issues。
+    列出仓库中的 Issues（使用 requests 直接调用，避免 PyGithub PaginatedList 兼容问题）。
 
     Args:
         state: Issue 状态 ("open", "closed", "all")
@@ -234,21 +234,34 @@ def list_issues(state: str = "open", labels: Optional[list[str]] = None) -> str:
     Returns:
         str: Issue 列表
     """
+    import requests as _req
     try:
-        repo = _get_repo()
-        label_str = ",".join(labels) if labels else None
-        issues = repo.get_issues(state=state, labels=label_str, sort="created", direction="desc")
-
+        url = f"https://api.github.com/repos/{settings.github_repo_full}/issues"
+        params = {"state": state, "sort": "created", "direction": "desc", "per_page": 20}
+        if labels:
+            params["labels"] = ",".join(labels)
+        headers = {
+            "Authorization": f"token {settings.github_token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+        r = _req.get(url, params=params, headers=headers,
+                     verify=settings.github_verify_ssl, timeout=15)
+        if r.status_code != 200:
+            return f"列出 Issues 失败: HTTP {r.status_code}"
+        data = r.json()
+        if not data:
+            return "没有找到 Issues"
         result_parts = [f"仓库 {settings.github_repo_full} 的 Issues (state={state}):"]
-        for issue in issues[:20]:  # 最多列出 20 个
-            labels_str = ", ".join(f"`{l.name}`" for l in issue.labels) if issue.labels else "(无标签)"
+        for i in data:
+            label_names = [l["name"] for l in i.get("labels", [])]
+            labels_str = ", ".join(f"`{ln}`" for ln in label_names) if label_names else "(无标签)"
+            assignees = [a["login"] for a in i.get("assignees", [])]
+            assignee_str = ", ".join(assignees) if assignees else "未分配"
             result_parts.append(
-                f"  - #{issue.number} | {issue.state} | [{labels_str}] | "
-                f"{issue.title[:80]} | 负责人: {', '.join(a.login for a in issue.assignees) if issue.assignees else '未分配'}"
+                f"  - #{i['number']} | {i['state']} | [{labels_str}] | "
+                f"{i['title'][:80]} | 负责人: {assignee_str}"
             )
-        return "\n".join(result_parts) if len(result_parts) > 1 else "没有找到 Issues"
-    except GithubException as e:
-        return f"列出 Issues 失败: {e.data.get('message', str(e)) if hasattr(e, 'data') else str(e)}"
+        return "\n".join(result_parts)
     except Exception as e:
         return f"列出 Issues 失败: {str(e)}"
 
@@ -358,20 +371,32 @@ Reviews ({len(reviews)} 条):
 
 
 def list_pull_requests(state: str = "open") -> str:
-    """列出仓库中的 PRs。"""
+    """列出仓库中的 PRs（使用 requests 直接调用，避免 PyGithub PaginatedList 兼容问题）。"""
+    import requests as _req
     try:
-        repo = _get_repo()
-        prs = repo.get_pulls(state=state, sort="created", direction="desc")
-
+        url = f"https://api.github.com/repos/{settings.github_repo_full}/pulls"
+        params = {"state": state, "sort": "created", "direction": "desc", "per_page": 20}
+        headers = {
+            "Authorization": f"token {settings.github_token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+        r = _req.get(url, params=params, headers=headers,
+                     verify=settings.github_verify_ssl, timeout=15)
+        if r.status_code != 200:
+            return f"列出 PRs 失败: HTTP {r.status_code}"
+        data = r.json()
+        if not data:
+            return "没有找到 PRs"
         result_parts = [f"仓库 {settings.github_repo_full} 的 Pull Requests (state={state}):"]
-        for pr in prs[:20]:
+        for pr in data:
             result_parts.append(
-                f"  - #{pr.number} | {pr.state} | {pr.head.ref} → {pr.base.ref} | "
-                f"{pr.title[:80]} | 创建者: {pr.user.login}"
+                f"  - #{pr['number']} | {pr['state']} | "
+                f"{pr['head']['ref']} -> {pr['base']['ref']} | "
+                f"{pr['title'][:80]} | 创建者: {pr['user']['login']}"
             )
-        return "\n".join(result_parts) if len(result_parts) > 1 else "没有找到 PRs"
-    except GithubException as e:
-        return f"列出 PRs 失败: {e.data.get('message', str(e)) if hasattr(e, 'data') else str(e)}"
+        return "\n".join(result_parts)
+    except Exception as e:
+        return f"列出 PRs 失败: {str(e)}"
 
 
 # ========== PR Review 操作 ==========

@@ -212,28 +212,24 @@ class TestScenario3BugFix:
 class TestScenario4Complex:
     def test_multiple_issues_tracking(self):
         """验证多 Issue 跟踪。"""
-        with patch("src.tools.github_tools._get_repo") as mock_repo_fn:
-            mock_repo = MagicMock()
-            mock_repo_fn.return_value = mock_repo
-
-            # Create mock issues
-            issues = []
-            for i, title in enumerate(["核心实现", "单元测试", "README"], 1):
-                mock_issue = MagicMock()
-                mock_issue.number = i
-                mock_issue.title = title
-                mock_issue.state = "open"
-                mock_issue.labels = []
-                mock_issue.assignees = []
-                mock_issue.user.login = "testuser"
-                issues.append(mock_issue)
-
-            mock_repo.get_issues.return_value = issues
+        with patch("requests.get") as mock_get:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = [
+                {"number": 1, "title": "核心实现", "state": "open",
+                 "labels": [], "assignees": []},
+                {"number": 2, "title": "单元测试", "state": "open",
+                 "labels": [], "assignees": []},
+                {"number": 3, "title": "README", "state": "open",
+                 "labels": [], "assignees": []},
+            ]
+            mock_get.return_value = mock_response
 
             from src.tools.github_tools import list_issues
 
             result = list_issues(state="open")
-            assert "仓库" in result
+            assert "核心实现" in result
+            assert "#1" in result
 
     def test_rollback_scenario(self):
         """验证回退场景。"""

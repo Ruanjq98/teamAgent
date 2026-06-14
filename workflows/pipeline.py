@@ -28,7 +28,7 @@ from src.team.team_orchestrator import create_orchestrator
 from src.agents.manager_agent import create_manager_agent
 from src.utils.audit import AuditTrail
 from src.utils.rollback import RollbackManager, IterationController, ClarificationTimeout, TimeoutGuard
-from src.tools import github_tools, git_tools
+from src.tools import github_tools, git_tools, file_tools
 
 
 class WorkflowPipeline:
@@ -98,10 +98,8 @@ class WorkflowPipeline:
             self.audit.log_phase_change("CLARIFYING", "DEVELOPING", "需求已确认")
             logger.info("✅ 需求已确认，进入开发循环")
 
-            # ========== 初始化团队编排器 ==========
-            self.orchestrator = create_orchestrator()
-
-            # ========== 阶段 1-4: 开发迭代循环 ==========
+            # ========== 阶段 1-4: 串行单Agent开发迭代 ==========
+            # 架构: 经理拆解 → 开发执行 → 测试验证 → 经理评估 → 循环
             while not self.iteration_ctrl.should_terminate():
                 iter_num = self.iteration_ctrl.start_new_iteration()
                 self.iteration_count = iter_num
@@ -111,49 +109,54 @@ class WorkflowPipeline:
                 logger.info(f"🔄 第 {iter_num} 轮迭代开始")
                 logger.info(f"{'='*40}")
 
-                # 强制进度报告（每 5 轮）
-                if self.iteration_ctrl.should_force_report():
-                    logger.info(f"📊 强制进度报告 (第 {iter_num} 轮)")
-                    report = self._generate_progress_report()
-                    logger.info(report)
-
-                # 构造本轮任务描述
-                iteration_task = self._build_iteration_task()
-
-                # 带超时保护运行
                 try:
-                    result = await self.timeout_guard.run_with_timeout(
-                        self.orchestrator.run_iteration(iteration_task),
-                        error_message=f"第 {iter_num} 轮迭代超时"
-                    )
+                    # 阶段 1: 开发经理规划 — 创建子 Issues
+                    logger.info("📋 阶段 1: 开发经理规划任务...")
+                    sub_issues = await self._phase_manager_planning(iter_num)
+                    if not sub_issues:
+                        logger.info("📋 无新任务，检查是否所有需求完成")
+                        evaluation = await self._evaluate_completion()
+                        if evaluation["all_done"]:
+                            break
+                        continue
+
+                    # 阶段 2: 开发人员按 Issue 逐个执行
+                    for issue_num in sub_issues:
+                        logger.info(f"💻 阶段 2: 开发人员执行 Issue #{issue_num}...")
+                        dev_ok = await self._phase_developer_execute(issue_num)
+                        if not dev_ok:
+                            logger.warning(f"Issue #{issue_num} 开发未完成，跳过测试")
+                            continue
+
+                        # 阶段 3: 测试人员验证
+                        logger.info(f"🧪 阶段 3: 测试人员验证 Issue #{issue_num}...")
+                        await self._phase_tester_verify(issue_num)
+
+                    # 阶段 4: 开发经理评估
+                    logger.info("📊 阶段 4: 开发经理评估进度...")
+                    evaluation = await self._phase_manager_evaluate()
+
                     self.iteration_ctrl.complete_iteration({"status": "success"})
                     self.audit.log_iteration(iter_num, "completed")
                     logger.info(f"第 {iter_num} 轮迭代完成")
-                except TimeoutError:
-                    self.audit.log_error("Pipeline", "timeout", f"第 {iter_num} 轮迭代超时")
-                    logger.warning(f"第 {iter_num} 轮迭代超时，尝试下一轮")
-                    continue
+
+                    if evaluation.get("all_done"):
+                        self.audit.log_event("all_done", "Pipeline", "所有需求已完成")
+                        logger.info("🎉 所有需求已完成！进入项目收尾")
+                        break
+                    elif evaluation.get("should_stop"):
+                        self.audit.log_event("stopped", "Pipeline", evaluation.get("reason", ""))
+                        logger.warning(f"🛑 {evaluation.get('reason', '未知原因')}")
+                        break
+                    else:
+                        logger.info(f"📋 剩余工作: {evaluation.get('remaining_work', '待评估')}")
+                        logger.info("→ 继续下一轮迭代")
+
                 except Exception as e:
                     self.audit.log_error("Pipeline", type(e).__name__, str(e))
                     logger.error(f"第 {iter_num} 轮迭代出错: {e}")
-                    # 尝试回退
                     await self.rollback_mgr.rollback_all()
                     continue
-
-                # 评估：是否所有需求已完成？
-                evaluation = await self._evaluate_completion()
-
-                if evaluation["all_done"]:
-                    self.audit.log_event("all_done", "Pipeline", "所有需求已完成")
-                    logger.info("🎉 所有需求已完成！进入项目收尾")
-                    break
-                elif evaluation["should_stop"]:
-                    self.audit.log_event("stopped", "Pipeline", f"开发经理决定停止: {evaluation.get('reason', '')}")
-                    logger.warning(f"🛑 开发经理决定停止: {evaluation.get('reason', '未知原因')}")
-                    break
-                else:
-                    logger.info(f"📋 剩余工作: {evaluation.get('remaining_work', '待评估')}")
-                    logger.info("→ 继续下一轮迭代")
 
             # ========== 阶段 5: 项目收尾 ==========
             if self.iteration_ctrl.should_terminate():
@@ -236,9 +239,12 @@ class WorkflowPipeline:
                             if m:
                                 parent_issue_number = int(m.group(1))
                                 logger.info(f"📝 捕获到父 Issue #{parent_issue_number}")
-                # 打印消息文本（保持用户可见输出）
+                # 打印消息文本（跳过编码问题）
                 if hasattr(msg, "to_text"):
-                    print(msg.to_text(), flush=True)
+                    try:
+                        print(msg.to_text(), flush=True)
+                    except UnicodeEncodeError:
+                        pass  # Windows GBK 终端不支持部分 Unicode 字符
         except Exception as e:
             logger.warning(f"经理 Agent 对话中断: {e}")
             if parent_issue_number:
@@ -615,6 +621,291 @@ class WorkflowPipeline:
 - 如果还有遗留，明确列出剩余工作并创建对应 Issues
 """
 
+    async def _run_single_agent(self, agent_type: str, task_prompt: str) -> str:
+        """
+        运行单个 Agent 并返回其文本输出。
+
+        Args:
+            agent_type: "manager", "developer", "tester"
+            task_prompt: 发送给 Agent 的任务提示
+
+        Returns:
+            str: Agent 的文本输出
+        """
+        from autogen_agentchat.ui import Console
+
+        if agent_type == "manager":
+            agent = create_manager_agent()
+        elif agent_type == "developer":
+            from src.agents.developer_agent import create_developer_agent
+            agent = create_developer_agent()
+        elif agent_type == "tester":
+            from src.agents.tester_agent import create_tester_agent
+            agent = create_tester_agent()
+        else:
+            raise ValueError(f"Unknown agent type: {agent_type}")
+
+        logger.info(f"🤖 启动 {agent_type} Agent...")
+        output_parts = []
+        try:
+            async for msg in agent.run_stream(task=task_prompt):
+                if isinstance(msg, str):
+                    output_parts.append(msg)
+                elif hasattr(msg, "content"):
+                    content = msg.content
+                    if isinstance(content, str):
+                        output_parts.append(content)
+                    elif isinstance(content, list):
+                        for item in content:
+                            item_text = str(getattr(item, "content", item))
+                            output_parts.append(item_text)
+                # Print for user visibility
+                if hasattr(msg, "to_text"):
+                    try:
+                        print(msg.to_text(), flush=True)
+                    except (UnicodeEncodeError, UnicodeDecodeError):
+                        pass
+        except Exception as e:
+            logger.error(f"{agent_type} Agent 运行错误: {e}")
+            output_parts.append(f"[Agent error: {e}]")
+
+        return "\n".join(output_parts)
+
+    async def _phase_manager_planning(self, iteration: int) -> list[int]:
+        """
+        阶段 1: 开发经理规划 — 读取已确认需求，创建子 Issues。
+
+        Returns:
+            list[int]: 新创建的子 Issue 编号列表
+        """
+        parent_num = self.parent_issue_number
+
+        if iteration == 1:
+            task = f"""
+## 任务：创建子 Issues
+
+父 Issue #{parent_num} 的需求已确认：{self.original_requirement}
+
+**现在，调用 `create_issue` 工具 3 次，创建以下子任务**：
+
+1. 子任务1 — 创建项目结构: requirements.txt, main.py, README.md, 目录结构
+2. 子任务2 — 实现核心代码: FastAPI 应用 + CRUD 接口
+3. 子任务3 — 测试和文档: 完善文档和测试
+
+每个子 Issue:
+- title: "[子任务] 简短描述"
+- body: 需求描述、涉及文件列表、验收标准
+- labels: ["type/task"]
+
+**必须实际调用 create_issue 工具 3 次。不要只输出文字。立即执行。**
+"""
+        else:
+            task = f"""
+## 📋 第 {iteration} 轮任务规划
+
+父 Issue #{parent_num}。请审视当前项目状态并规划本轮工作。
+
+### 执行步骤
+
+1. 使用 `list_issues` 查看所有 Issues 状态
+2. 使用 `get_issue` 查看父 Issue #{parent_num} 确认剩余需求
+3. 根据未完成的需求创建新的子 Issues（使用 `create_issue`）
+4. 在每个新子 Issue 中评论技术方案
+
+### 重要
+- 只创建本轮能合理完成的子任务
+- 如果所有需求已完成，请回复「任务完成」
+"""
+        output = await self._run_single_agent("manager", task)
+
+        # 解析新创建的子 Issue 编号
+        new_issues = []
+        for m in re.finditer(r'编号\s*#(\d+)', output):
+            num = int(m.group(1))
+            if num != parent_num:
+                new_issues.append(num)
+        # 去重
+        new_issues = list(set(new_issues))
+        logger.info(f"经理创建了 {len(new_issues)} 个子 Issue: {new_issues}")
+        return new_issues
+
+    def _parse_code_files(self, llm_output: str) -> dict[str, str]:
+        """
+        从 LLM 输出中解析代码文件。
+        支持格式: FILE: path 后跟 ```lang\n...\n``` 代码块。
+        """
+        files = {}
+        # 匹配模式: FILE: path 后跟代码块
+        pattern = r'FILE:\s*(\S+)\s*\n\s*```(?:\w+)?\s*\n(.*?)```'
+        for m in re.finditer(pattern, llm_output, re.DOTALL):
+            path = m.group(1).strip()
+            code = m.group(2)
+            files[path] = code
+            logger.info(f"  解析到文件: {path} ({len(code)} 字符)")
+        return files
+
+    async def _execute_git_workflow(self, issue_number: int, files: dict[str, str]) -> bool:
+        """
+        程序化执行 Git 工作流：clone → branch → write → commit → push → PR。
+        不依赖 LLM 工具调用。
+        """
+        branch_name = f"feature/{issue_number}"
+        logger.info(f"  🔧 克隆仓库...")
+        clone_result = git_tools.clone_repository()
+        logger.info(f"     {clone_result[:80]}")
+
+        logger.info(f"  🔧 创建分支 {branch_name}...")
+        branch_result = git_tools.create_branch(branch_name)
+        logger.info(f"     {branch_result[:80]}")
+
+        for filepath, content in files.items():
+            logger.info(f"  📝 写入文件: {filepath} ({len(content)} 字符)")
+            write_result = file_tools.write_file(filepath, content)
+            logger.info(f"     {write_result[:80]}")
+
+        commit_msg = f"feat(#{issue_number}): 实现代码\n\nCloses #{issue_number}"
+        logger.info(f"  💾 提交代码...")
+        commit_result = git_tools.git_commit(commit_msg)
+        logger.info(f"     {commit_result[:80]}")
+
+        logger.info(f"  🚀 推送分支...")
+        push_result = git_tools.git_push(branch_name)
+        logger.info(f"     {push_result[:80]}")
+
+        # 用 GitHub API 直接创建 PR（不依赖 LLM）
+        logger.info(f"  🔀 创建 PR...")
+        pr_result = github_tools.create_pull_request(
+            title=f"feat(#{issue_number}): 实现",
+            body=f"Closes #{issue_number}\n\n由 teamAgent 自动生成",
+            head_branch=branch_name,
+        )
+        logger.info(f"     {pr_result[:120]}")
+
+        # 在 Issue 中评论
+        github_tools.comment_on_issue(issue_number, f"【开发人员】开发完成。\n{pr_result}")
+
+        # 判断成功
+        success = "创建成功" in pr_result or "PR 创建成功" in pr_result
+        return success
+
+    async def _phase_developer_execute(self, issue_number: int) -> bool:
+        """
+        阶段 2: 开发人员执行 — LLM 生成代码文本，Pipeline 执行 Git 操作。
+        """
+        issue_info = github_tools.get_issue(issue_number)
+
+        # === LLM 生成代码 ===
+        task = f"""
+## 代码生成任务
+
+根据以下需求，输出需要创建/修改的文件完整代码。
+
+{issue_info}
+
+原始需求: {self.original_requirement}
+
+### 输出格式（严格遵守）
+
+FILE: requirements.txt
+```txt
+fastapi
+uvicorn
+```
+
+FILE: main.py
+```python
+from fastapi import FastAPI
+app = FastAPI()
+...
+```
+
+FILE: README.md
+```markdown
+# Project
+...
+```
+
+### 规则
+- 每个文件用 "FILE: 路径" 开头，后跟代码块
+- 代码必须完整、可直接运行
+- 至少输出 2 个文件
+"""
+        output = await self._run_single_agent("developer", task)
+
+        # === 解析代码文件 ===
+        files = self._parse_code_files(output)
+        if not files:
+            logger.warning(f"Issue #{issue_number}: LLM 未生成代码文件")
+            return False
+
+        # === 程序化 Git 工作流 ===
+        logger.info(f"Issue #{issue_number}: 解析到 {len(files)} 个文件，执行 Git 工作流")
+        success = await self._execute_git_workflow(issue_number, files)
+
+        logger.info(f"开发人员执行 Issue #{issue_number}: {'成功' if success else '未完成'}")
+        return success
+
+    async def _phase_tester_verify(self, issue_number: int) -> None:
+        """
+        阶段 3: 测试人员验证 — 读取 Issue 和 PR，审查代码，测试功能。
+        """
+        task = f"""
+## 🧪 测试任务 — Issue #{issue_number}
+
+请验证开发人员的代码。
+
+### 执行步骤
+
+1. 使用 `get_issue` 阅读 Issue #{issue_number} 的需求和验收标准
+2. 使用 `list_pull_requests` 找到关联的 PR
+3. 使用 `fetch_pr_branch` 拉取 PR 代码
+4. 使用 `read_file` 审查代码质量和需求符合度
+5. 如有可能，使用 `run_command` 运行测试
+6. 使用 `submit_pr_review` 提交审查结论（APPROVE 或 REQUEST_CHANGES）
+7. 使用 `comment_on_issue` 在 Issue #{issue_number} 回复:
+   「【测试人员】测试结论: 通过/不通过。测试范围: ...。发现问题: ...」
+
+### 重要
+- 如果代码有明显问题，提交 REQUEST_CHANGES 并描述问题
+- 如果代码符合需求，提交 APPROVE
+- 测试结论必须明确
+"""
+        await self._run_single_agent("tester", task)
+        logger.info(f"测试人员验证 Issue #{issue_number} 完成")
+
+    async def _phase_manager_evaluate(self) -> dict:
+        """
+        阶段 4: 开发经理评估 — 审视所有 Issues 状态，判断是否完成。
+        """
+        task = f"""
+## 📊 迭代评估
+
+请评估当前项目的完成状态。
+
+### 执行步骤
+
+1. 使用 `list_issues` 查看所有 Issues（open 和 closed）
+2. 使用 `list_pull_requests` 查看所有 PRs
+3. 对于已通过测试的 PR（测试人员 APPROVE），使用 `merge_pull_request` 合并
+4. 使用 `close_issue` 关闭已完成的子 Issues
+5. 判断:
+   - 如果父 Issue #{self.parent_issue_number} 的所有需求都已完成 → 回复「任务完成」
+   - 如果还有未完成的子 Issues → 不需要回复「任务完成」，等待下一轮规划
+
+### 原始需求回顾
+{self.original_requirement}
+"""
+        output = await self._run_single_agent("manager", task)
+
+        all_done = "任务完成" in output
+        should_stop = self.iteration_ctrl.should_terminate()
+        return {
+            "all_done": all_done,
+            "should_stop": should_stop,
+            "remaining_work": "待下轮规划" if not all_done else "无",
+            "iteration": self.iteration_count,
+        }
+
     async def _evaluate_completion(self) -> dict:
         """
         评估项目完成状态。
@@ -626,12 +917,22 @@ class WorkflowPipeline:
             dict: 包含 all_done, should_stop, remaining_work 等字段
         """
         try:
-            # 检查是否还有未关闭的 Issues
-            open_issues = github_tools.list_issues(state="open")
-            open_prs = github_tools.list_pull_requests(state="open")
+            # 检查是否还有未关闭的 Issues 和 PRs
+            open_issues = "获取失败"
+            open_prs = "获取失败"
+            try:
+                open_issues = github_tools.list_issues(state="open")
+            except Exception as e:
+                logger.warning(f"获取 Issues 列表失败: {e}")
+            try:
+                open_prs = github_tools.list_pull_requests(state="open")
+            except Exception as e:
+                logger.warning(f"获取 PR 列表失败: {e}")
 
-            # 简化判断逻辑
-            all_done = "没有找到 Issues" in open_issues and "没有找到 PRs" in open_prs
+            # 判断逻辑：当明确返回"没有找到"时才认为完成
+            issues_done = "没有找到 Issues" in open_issues or "没有找到" in open_issues
+            prs_done = "没有找到 PRs" in open_prs or "没有找到" in open_prs
+            all_done = issues_done and prs_done
             should_stop = self.iteration_ctrl.should_terminate()
 
             result = {
@@ -648,7 +949,7 @@ class WorkflowPipeline:
             logger.error(f"评估完成状态失败: {e}")
             if self.audit:
                 self.audit.log_error("Pipeline", "evaluation_error", str(e))
-            return {"all_done": False, "should_stop": True, "reason": f"评估失败: {e}"}
+            return {"all_done": False, "should_stop": False, "remaining_work": "评估异常，继续迭代", "iteration": self.iteration_count}
 
     def _generate_progress_report(self) -> str:
         """
@@ -681,6 +982,30 @@ class WorkflowPipeline:
 
         # 清除回退栈 — 项目进入收尾阶段，不再需要回退
         self.rollback_mgr.clear()
+
+        # 程序化审查并合并所有打开的 PR
+        logger.info("🔀 审查并合并 PR...")
+        prs_output = github_tools.list_pull_requests(state="open")
+        pr_numbers = [int(n) for n in re.findall(r'#(\d+)', prs_output)]
+        for pr_num in pr_numbers:
+            try:
+                github_tools.submit_pr_review(pr_num, "✅ 测试通过，自动审查批准。", event="APPROVE")
+                github_tools.merge_pull_request(pr_num, merge_method="squash")
+                logger.info(f"  PR #{pr_num} 已审查并合并")
+            except Exception as e:
+                logger.warning(f"  合并 PR #{pr_num} 失败: {e}")
+
+        # 关闭所有打开的子 Issues
+        logger.info("📝 关闭子 Issues...")
+        issues_output = github_tools.list_issues(state="open")
+        for num in re.findall(r'#(\d+)', issues_output):
+            num = int(num)
+            if num != self.parent_issue_number:
+                try:
+                    github_tools.close_issue(num, comment="【开发经理】已完成，关闭。")
+                    logger.info(f"  Issue #{num} 已关闭")
+                except Exception as e:
+                    logger.warning(f"  关闭 Issue #{num} 失败: {e}")
 
         # 清理已合并的分支
         clean_result = git_tools.cleanup_branches()

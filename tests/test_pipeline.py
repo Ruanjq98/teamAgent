@@ -174,7 +174,7 @@ class TestErrorHandling:
         with patch("src.tools.github_tools.list_issues", side_effect=Exception("API down")):
             result = asyncio.run(pipeline._evaluate_completion())
             assert result["all_done"] == False
-            assert result["should_stop"] == True
+            assert result["should_stop"] == False  # API 错误不终止，继续迭代
 
     def test_rollback_execution(self):
         """测试回退执行。"""
