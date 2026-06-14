@@ -21,6 +21,9 @@ _MANAGER_TOOLS = [
     github_tools.get_issue,
     github_tools.list_issues,
     github_tools.add_labels_to_issue,
+    github_tools.remove_labels_from_issue,
+    github_tools.get_issue_comments,
+    github_tools.get_issue_labels,
     # PR 操作
     github_tools.get_pull_request,
     github_tools.list_pull_requests,

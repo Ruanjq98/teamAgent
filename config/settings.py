@@ -32,6 +32,12 @@ class Settings:
     max_iterations: int = int(os.getenv("MAX_ITERATIONS", "20"))
     max_messages_per_round: int = int(os.getenv("MAX_MESSAGES_PER_ROUND", "50"))
 
+    # ========== 需求澄清轮询 ==========
+    clarification_poll_interval: int = int(os.getenv("CLARIFICATION_POLL_INTERVAL", "60"))
+    clarification_reminder_hours: int = int(os.getenv("CLARIFICATION_REMINDER_HOURS", "48"))
+    clarification_suspend_days: int = int(os.getenv("CLARIFICATION_SUSPEND_DAYS", "7"))
+    clarification_max_polls: int = int(os.getenv("CLARIFICATION_MAX_POLLS", "0"))
+
     # ========== 日志 ==========
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 

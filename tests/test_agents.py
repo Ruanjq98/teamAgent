@@ -42,7 +42,7 @@ class TestAgentCreation:
             mock_model.return_value = mock_client
             agent = create_manager_agent()
             assert agent.name == "开发经理"
-            assert len(_MANAGER_TOOLS) == 10
+            assert len(_MANAGER_TOOLS) == 13
 
     def test_developer_agent_creation(self):
         """测试开发人员 Agent 创建。"""

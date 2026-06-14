@@ -387,3 +387,153 @@ def create_branch_on_github(branch_name: str, base_branch: str = "main") -> str:
         return f"GitHub 分支 {branch_name} 创建成功 (基于 {base_branch})"
     except GithubException as e:
         return f"创建分支 {branch_name} 失败: {e.data.get('message', str(e)) if hasattr(e, 'data') else str(e)}"
+
+
+# ========== 需求澄清辅助工具 ==========
+
+def _get_bot_username() -> str:
+    """
+    获取当前认证 GitHub 用户的登录名（用于区分 Bot 评论和用户评论）。
+
+    Returns:
+        str: GitHub 用户名，获取失败时返回空字符串
+    """
+    global _github_client
+    try:
+        if _github_client is None:
+            _github_client = Github(settings.github_token)
+        user = _github_client.get_user()
+        return user.login or ""
+    except GithubException:
+        return ""
+
+
+def _get_issue_comments_raw(issue_number: int) -> list[dict]:
+    """
+    获取指定 Issue 的结构化评论数据（内部使用）。
+
+    Args:
+        issue_number: Issue 编号
+
+    Returns:
+        list[dict]: 评论列表，每项包含 id, author, body, created_at
+    """
+    try:
+        repo = _get_repo()
+        issue = repo.get_issue(number=issue_number)
+        comments = issue.get_comments()
+        return [
+            {
+                "id": c.id,
+                "author": c.user.login if c.user else "unknown",
+                "body": c.body or "",
+                "created_at": c.created_at,
+            }
+            for c in comments
+        ]
+    except GithubException:
+        return []
+
+
+def get_issue_comments(issue_number: int, max_comments: int = 50) -> str:
+    """
+    获取指定 Issue 的评论列表（不包括 Issue 正文）。
+
+    Args:
+        issue_number: Issue 编号
+        max_comments: 最多返回的评论数 (默认 50)
+
+    Returns:
+        str: 格式化的评论列表，或错误信息
+    """
+    try:
+        repo = _get_repo()
+        issue = repo.get_issue(number=issue_number)
+        comments = issue.get_comments()
+        total = comments.totalCount
+
+        if total == 0:
+            return f"Issue #{issue_number} 暂无评论"
+
+        result_parts = [f"Issue #{issue_number} 的评论列表 (共 {total} 条):"]
+        for c in comments[:max_comments]:
+            author = c.user.login if c.user else "unknown"
+            created = c.created_at.strftime("%Y-%m-%d %H:%M") if c.created_at else "?"
+            result_parts.append(
+                f"\n--- 评论 #{c.id} | @{author} ({created}) ---\n{c.body or '(无内容)'}"
+            )
+
+        if total > max_comments:
+            result_parts.append(f"\n... (还有 {total - max_comments} 条评论未显示)")
+
+        return "\n".join(result_parts)
+    except GithubException as e:
+        return f"获取 Issue #{issue_number} 评论失败: {e.data.get('message', str(e)) if hasattr(e, 'data') else str(e)}"
+
+
+def get_issue_labels(issue_number: int) -> str:
+    """
+    获取指定 Issue 的标签列表。
+
+    Args:
+        issue_number: Issue 编号
+
+    Returns:
+        str: 逗号分隔的标签名称列表，或错误信息
+    """
+    try:
+        repo = _get_repo()
+        issue = repo.get_issue(number=issue_number)
+        labels = [l.name for l in issue.labels]
+        if labels:
+            return f"Issue #{issue_number} 的标签: {', '.join(labels)}"
+        return f"Issue #{issue_number} 没有标签"
+    except GithubException as e:
+        return f"获取 Issue #{issue_number} 标签失败: {e.data.get('message', str(e)) if hasattr(e, 'data') else str(e)}"
+
+
+def remove_labels_from_issue(issue_number: int, labels: list[str]) -> str:
+    """
+    从指定 Issue 移除标签。
+
+    Args:
+        issue_number: Issue 编号
+        labels: 要移除的标签名称列表
+
+    Returns:
+        str: 操作结果描述
+    """
+    try:
+        repo = _get_repo()
+        issue = repo.get_issue(number=issue_number)
+        removed = []
+        for label in labels:
+            try:
+                issue.remove_from_labels(label)
+                removed.append(label)
+            except GithubException:
+                pass  # 标签可能不存在，跳过
+        if removed:
+            return f"已从 Issue #{issue_number} 移除标签: {', '.join(removed)}"
+        return f"Issue #{issue_number} 没有需要移除的标签"
+    except GithubException as e:
+        return f"移除 Issue #{issue_number} 标签失败: {e.data.get('message', str(e)) if hasattr(e, 'data') else str(e)}"
+
+
+def issue_has_label(issue_number: int, label_name: str) -> bool:
+    """
+    检查 Issue 是否包含指定标签（内部使用）。
+
+    Args:
+        issue_number: Issue 编号
+        label_name: 要检查的标签名称
+
+    Returns:
+        bool: 是否包含该标签
+    """
+    try:
+        repo = _get_repo()
+        issue = repo.get_issue(number=issue_number)
+        return any(l.name == label_name for l in issue.labels)
+    except GithubException:
+        return False

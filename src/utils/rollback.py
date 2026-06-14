@@ -198,24 +198,53 @@ class ClarificationTimeout:
     需求澄清超时处理。
 
     规则:
-    - 48 小时内用户未回复 → 发送一次提醒
-    - 7 天未回复 → 暂停项目
+    - REMINDER_AFTER 内用户未回复 → 发送一次提醒
+    - SUSPEND_AFTER 未回复 → 暂停项目
+
+    时长可通过构造函数参数或 settings 配置。
     """
 
-    REMINDER_AFTER = timedelta(hours=48)
-    SUSPEND_AFTER = timedelta(days=7)
+    def __init__(
+        self,
+        issue_number: int,
+        reminder_after: Optional[timedelta] = None,
+        suspend_after: Optional[timedelta] = None,
+    ):
+        from config.settings import settings as _settings
 
-    def __init__(self, issue_number: int):
         self.issue_number = issue_number
+        self.reminder_after = reminder_after or timedelta(
+            hours=_settings.clarification_reminder_hours
+        )
+        self.suspend_after = suspend_after or timedelta(
+            days=_settings.clarification_suspend_days
+        )
         self.last_user_reply: Optional[datetime] = None
         self.reminder_sent = False
         self.suspended = False
 
+    @property
+    def is_suspended(self) -> bool:
+        """是否已暂停。"""
+        return self.suspended
+
     def record_user_reply(self):
-        """记录用户的回复时间。"""
+        """记录用户的回复时间，重置所有超时标记。"""
         self.last_user_reply = datetime.now()
         self.reminder_sent = False
         self.suspended = False
+
+    def reset(self):
+        """完全重置超时状态。"""
+        self.last_user_reply = None
+        self.reminder_sent = False
+        self.suspended = False
+
+    def elapsed_since_last_reply(self) -> timedelta:
+        """返回距离上次用户回复的时间。无回复则返回与创建时间的差值。"""
+        if self.last_user_reply is None:
+            return timedelta(0)
+        return datetime.now() - self.last_user_reply
 
     def check_timeout(self) -> dict:
         """
@@ -229,7 +258,11 @@ class ClarificationTimeout:
             }
         """
         if self.last_user_reply is None:
-            return {"should_remind": False, "should_suspend": False, "inactive_duration": "N/A"}
+            return {
+                "should_remind": False,
+                "should_suspend": False,
+                "inactive_duration": "N/A",
+            }
 
         inactive = datetime.now() - self.last_user_reply
 
@@ -239,10 +272,10 @@ class ClarificationTimeout:
             "inactive_duration": str(inactive),
         }
 
-        if inactive >= self.SUSPEND_AFTER and not self.suspended:
+        if inactive >= self.suspend_after and not self.suspended:
             result["should_suspend"] = True
             self.suspended = True
-        elif inactive >= self.REMINDER_AFTER and not self.reminder_sent:
+        elif inactive >= self.reminder_after and not self.reminder_sent:
             result["should_remind"] = True
             self.reminder_sent = True
 

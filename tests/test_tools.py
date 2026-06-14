@@ -435,3 +435,187 @@ class TestRollback:
         result = ct.check_timeout()
         assert not result["should_remind"]
         assert not result["should_suspend"]
+
+
+# ========== New GitHub Tools Tests (Clarification) ==========
+
+
+class TestGitHubClarificationTools:
+    """需求澄清相关 GitHub 工具测试。"""
+
+    def test_get_issue_comments_mock(self):
+        """测试获取 Issue 评论。"""
+        from unittest.mock import MagicMock, PropertyMock
+        from datetime import datetime
+
+        with patch("src.tools.github_tools._get_repo") as mock_repo_fn:
+            mock_repo = MagicMock()
+            mock_issue = MagicMock()
+
+            mock_comment = MagicMock()
+            mock_comment.id = 101
+            mock_comment.user.login = "bot-user"
+            mock_comment.body = "请确认需求。Q1：这是什么？"
+            mock_comment.created_at = datetime(2026, 6, 14, 10, 0, 0)
+
+            # Create a mock that behaves like PaginatedList (supports totalCount + iteration + slicing)
+            mock_comments = MagicMock()
+            type(mock_comments).totalCount = PropertyMock(return_value=1)
+            # Make slicing work by returning the list when sliced
+            mock_comments.__getitem__.return_value = [mock_comment]
+            mock_comments.__iter__.return_value = iter([mock_comment])
+
+            mock_issue.get_comments.return_value = mock_comments
+            mock_repo.get_issue.return_value = mock_issue
+            mock_repo_fn.return_value = mock_repo
+
+            from src.tools.github_tools import get_issue_comments
+
+            result = get_issue_comments(1)
+            assert "Q1" in result
+
+    def test_remove_labels_from_issue_mock(self):
+        """测试从 Issue 移除标签。"""
+        with patch("src.tools.github_tools._get_repo") as mock_repo_fn:
+            mock_repo = MagicMock()
+            mock_issue = MagicMock()
+            mock_repo.get_issue.return_value = mock_issue
+            mock_repo_fn.return_value = mock_repo
+
+            from src.tools.github_tools import remove_labels_from_issue
+
+            result = remove_labels_from_issue(1, ["status/needs-clarification"])
+            assert "移除标签" in result
+            mock_issue.remove_from_labels.assert_called_once_with(
+                "status/needs-clarification"
+            )
+
+    def test_get_issue_labels_mock(self):
+        """测试获取 Issue 标签。"""
+        with patch("src.tools.github_tools._get_repo") as mock_repo_fn:
+            mock_repo = MagicMock()
+            mock_issue = MagicMock()
+
+            mock_label1 = MagicMock()
+            mock_label1.name = "type/question"
+            mock_label2 = MagicMock()
+            mock_label2.name = "status/needs-clarification"
+            mock_issue.labels = [mock_label1, mock_label2]
+
+            mock_repo.get_issue.return_value = mock_issue
+            mock_repo_fn.return_value = mock_repo
+
+            from src.tools.github_tools import get_issue_labels
+
+            result = get_issue_labels(1)
+            assert "type/question" in result
+            assert "needs-clarification" in result
+
+    def test_issue_has_label_true(self):
+        """测试标签存在返回 True。"""
+        with patch("src.tools.github_tools._get_repo") as mock_repo_fn:
+            mock_repo = MagicMock()
+            mock_issue = MagicMock()
+
+            mock_label = MagicMock()
+            mock_label.name = "status/confirmed"
+            mock_issue.labels = [mock_label]
+
+            mock_repo.get_issue.return_value = mock_issue
+            mock_repo_fn.return_value = mock_repo
+
+            from src.tools.github_tools import issue_has_label
+
+            assert issue_has_label(1, "status/confirmed") is True
+
+    def test_issue_has_label_false(self):
+        """测试标签不存在返回 False。"""
+        with patch("src.tools.github_tools._get_repo") as mock_repo_fn:
+            mock_repo = MagicMock()
+            mock_issue = MagicMock()
+            mock_issue.labels = []
+            mock_repo.get_issue.return_value = mock_issue
+            mock_repo_fn.return_value = mock_repo
+
+            from src.tools.github_tools import issue_has_label
+
+            assert issue_has_label(1, "status/confirmed") is False
+
+    def test_get_bot_username_mock(self):
+        """测试获取机器人用户名。"""
+        with patch("src.tools.github_tools.Github") as MockGithub:
+            mock_gh = MagicMock()
+            mock_user = MagicMock()
+            mock_user.login = "test-bot"
+            mock_gh.get_user.return_value = mock_user
+            MockGithub.return_value = mock_gh
+
+            # Reset global state to trigger the Github call
+            import src.tools.github_tools as gt
+            old_client = gt._github_client
+            gt._github_client = None
+            try:
+                username = gt._get_bot_username()
+                assert username == "test-bot"
+            finally:
+                gt._github_client = old_client
+
+    def test_get_issue_comments_raw_mock(self):
+        """测试获取结构化评论数据。"""
+        from datetime import datetime
+
+        with patch("src.tools.github_tools._get_repo") as mock_repo_fn:
+            mock_repo = MagicMock()
+            mock_issue = MagicMock()
+
+            mock_comment = MagicMock()
+            mock_comment.id = 101
+            mock_comment.user.login = "test-user"
+            mock_comment.body = "确认需求"
+            mock_comment.created_at = datetime(2026, 6, 14, 10, 0, 0)
+
+            mock_issue.get_comments.return_value = [mock_comment]
+            mock_repo.get_issue.return_value = mock_issue
+            mock_repo_fn.return_value = mock_repo
+
+            from src.tools.github_tools import _get_issue_comments_raw
+
+            result = _get_issue_comments_raw(1)
+            assert len(result) == 1
+            assert result[0]["id"] == 101
+            assert result[0]["author"] == "test-user"
+            assert result[0]["body"] == "确认需求"
+
+    def test_clarification_timeout_configurable(self):
+        """测试 ClarificationTimeout 支持可配置时长。"""
+        from src.utils.rollback import ClarificationTimeout
+        from datetime import timedelta
+
+        ct = ClarificationTimeout(
+            issue_number=1,
+            reminder_after=timedelta(seconds=0.01),
+            suspend_after=timedelta(seconds=0.01),
+        )
+        ct.record_user_reply()
+
+        import time
+        time.sleep(0.02)
+
+        result = ct.check_timeout()
+        # 短时间后应触发 suspend (因为两者都设置得很短)
+        assert result["should_suspend"] or result["should_remind"]
+
+    def test_clarification_timeout_reset(self):
+        """测试 timeout reset。"""
+        from src.utils.rollback import ClarificationTimeout
+
+        ct = ClarificationTimeout(issue_number=1)
+        assert ct.last_user_reply is None
+
+        ct.record_user_reply()
+        assert ct.last_user_reply is not None
+
+        ct.reset()
+        assert ct.last_user_reply is None
+        assert ct.reminder_sent is False
+        assert ct.suspended is False

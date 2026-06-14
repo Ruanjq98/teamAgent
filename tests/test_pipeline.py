@@ -210,3 +210,151 @@ class TestErrorHandling:
         assert "failed" in executed
         assert executed == ["good", "failed"]
         assert len(rolled_back) == 1
+
+
+# ========== 需求澄清阶段测试 ==========
+
+
+class TestPhaseClarification:
+    """需求澄清循环测试。"""
+
+    def test_pipeline_pauses_on_clarification_failure(self):
+        """当 _phase_clarification 返回 False 时管道暂停。"""
+        from workflows.pipeline import WorkflowPipeline
+
+        pipeline = WorkflowPipeline()
+
+        with patch.object(pipeline, "_phase_clarification", return_value=False):
+            result = asyncio.run(pipeline.run("Test requirement"))
+            assert result["status"] == "paused"
+            assert "需求" in result["reason"]
+
+    @patch("autogen_agentchat.ui.Console")  # Mock Console to avoid message type issues
+    @patch("workflows.pipeline.github_tools.list_issues")
+    @patch("workflows.pipeline.github_tools.issue_has_label")
+    @patch("workflows.pipeline.github_tools._get_issue_comments_raw")
+    @patch("workflows.pipeline.github_tools._get_bot_username")
+    @patch("workflows.pipeline.create_manager_agent")
+    def test_clarification_confirmed_on_first_poll(
+        self, mock_create_mgr, mock_get_bot, mock_get_comments,
+        mock_has_label, mock_list_issues, mock_console,
+    ):
+        """测试第一次轮询检测到 confirmed 标签直接返回 True。"""
+        from workflows.pipeline import WorkflowPipeline
+
+        pipeline = WorkflowPipeline()
+        pipeline.audit = MagicMock()
+
+        mock_list_issues.return_value = "  - #1 | open | ... | [需求] Test | 负责人: 未分配"
+        mock_has_label.return_value = True
+        mock_get_comments.return_value = []
+        mock_get_bot.return_value = "test-bot"
+
+        async def mock_stream(task):
+            yield MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.run_stream = mock_stream
+        mock_create_mgr.return_value = mock_manager
+
+        with patch("workflows.pipeline.settings.clarification_poll_interval", 0.01):
+            result = asyncio.run(
+                pipeline._phase_clarification("Test requirement")
+            )
+            assert result is True
+
+    @patch("autogen_agentchat.ui.Console")
+    @patch("workflows.pipeline.github_tools.list_issues")
+    @patch("workflows.pipeline.github_tools.issue_has_label")
+    @patch("workflows.pipeline.github_tools._get_issue_comments_raw")
+    @patch("workflows.pipeline.github_tools._get_bot_username")
+    @patch("workflows.pipeline.create_manager_agent")
+    def test_clarification_extracts_issue_number(
+        self, mock_create_mgr, mock_get_bot, mock_get_comments,
+        mock_has_label, mock_list_issues, mock_console,
+    ):
+        """测试 Issue 编号提取。"""
+        from workflows.pipeline import WorkflowPipeline
+
+        pipeline = WorkflowPipeline()
+        pipeline.audit = MagicMock()
+
+        mock_list_issues.return_value = (
+            "仓库 o/r 的 Issues (state=open):\n"
+            "  - #42 | open | [type/question, status/needs-clarification] | Test | 负责人: 未分配"
+        )
+        mock_has_label.return_value = True
+        mock_get_comments.return_value = []
+        mock_get_bot.return_value = "test-bot"
+
+        async def mock_stream(task):
+            yield MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.run_stream = mock_stream
+        mock_create_mgr.return_value = mock_manager
+
+        with patch("workflows.pipeline.settings.clarification_poll_interval", 0.01):
+            result = asyncio.run(
+                pipeline._phase_clarification("Test")
+            )
+            assert result is True
+            assert pipeline.parent_issue_number == 42
+
+    @patch("autogen_agentchat.ui.Console")
+    @patch("workflows.pipeline.github_tools.list_issues")
+    @patch("workflows.pipeline.github_tools.issue_has_label")
+    @patch("workflows.pipeline.github_tools._get_issue_comments_raw")
+    @patch("workflows.pipeline.github_tools._get_bot_username")
+    @patch("workflows.pipeline.github_tools.comment_on_issue")
+    @patch("workflows.pipeline.create_manager_agent")
+    def test_clarification_suspends_after_timeout(
+        self, mock_create_mgr, mock_comment, mock_get_bot,
+        mock_get_comments, mock_has_label, mock_list_issues, mock_console,
+    ):
+        """测试超时后项目暂停。"""
+        from workflows.pipeline import WorkflowPipeline
+
+        pipeline = WorkflowPipeline()
+        pipeline.audit = MagicMock()
+
+        mock_list_issues.return_value = "  - #1 | open | ... | Test | 负责人: 未分配"
+        mock_has_label.return_value = False
+        mock_get_comments.return_value = []
+        mock_get_bot.return_value = "test-bot"
+
+        async def mock_stream(task):
+            yield MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.run_stream = mock_stream
+        mock_create_mgr.return_value = mock_manager
+
+        with patch("workflows.pipeline.settings.clarification_poll_interval", 0.01):
+            with patch("workflows.pipeline.settings.clarification_max_polls", 2):
+                result = asyncio.run(
+                    pipeline._phase_clarification("Test")
+                )
+                assert result is False
+
+    def test_clarification_timeout_reset_on_reply(self):
+        """测试新回复重置超时计时器。"""
+        from src.utils.rollback import ClarificationTimeout
+        from datetime import timedelta
+
+        ct = ClarificationTimeout(
+            issue_number=1,
+            reminder_after=timedelta(seconds=0.01),
+            suspend_after=timedelta(days=7),
+        )
+        ct.record_user_reply()
+
+        import time
+        time.sleep(0.02)
+
+        # Should trigger reminder
+        result = ct.check_timeout()
+        assert result["should_remind"] is True
+
+        # New reply resets
+        ct.record_user_reply()
+        result = ct.check_timeout()
+        assert result["should_remind"] is False
+        assert result["should_suspend"] is False
