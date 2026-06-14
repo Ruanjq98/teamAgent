@@ -338,6 +338,43 @@ class WorkflowPipeline:
                             f"{len(new_comments)} 条新评论",
                         )
 
+                    # 快速检测：用户是否明确表达了确认？
+                    user_confirmed = any(
+                        any(kw in c.get("body", "") for kw in [
+                            "可以开始开发", "需求确认完毕", "确认完毕",
+                            "没问题", "同意", "开始开发吧",
+                        ])
+                        for c in new_comments
+                    )
+                    # 或者所有问题都已有回复（评论数较多且没有拒绝词汇）
+                    answered_all = (
+                        len(current_comments) >= 5
+                        and not any(
+                            kw in c.get("body", "")
+                            for c in new_comments
+                            for kw in ["不同意", "有疑问", "不明确", "再确认"]
+                        )
+                    )
+
+                    if user_confirmed or answered_all:
+                        logger.info("🟢 检测到用户确认信号，直接确认需求")
+                        try:
+                            github_tools.add_labels_to_issue(
+                                parent_issue_number, ["status/confirmed"]
+                            )
+                            github_tools.remove_labels_from_issue(
+                                parent_issue_number,
+                                ["status/needs-clarification", "type/question"],
+                            )
+                            github_tools.comment_on_issue(
+                                parent_issue_number,
+                                "【开发经理】✅ 需求已确认，可以开始开发。",
+                            )
+                        except Exception as e:
+                            logger.error(f"确认操作失败: {e}")
+                        if github_tools.issue_has_label(parent_issue_number, "status/confirmed"):
+                            return True
+
                     # 运行经理 Agent 评估
                     confirmed = await self._run_clarification_evaluation(
                         parent_issue_number, requirement
@@ -365,7 +402,7 @@ class WorkflowPipeline:
                     )
                     github_tools.comment_on_issue(
                         parent_issue_number,
-                        "⏰ **项目已暂停**\n\n"
+                        "【开发经理】⏰ **项目已暂停**\n\n"
                         f"由于超过 {settings.clarification_suspend_days} 天未收到回复，"
                         "需求澄清流程已自动终止。如需继续，请重新启动项目。",
                     )
@@ -383,7 +420,7 @@ class WorkflowPipeline:
                     )
                     github_tools.comment_on_issue(
                         parent_issue_number,
-                        "⏰ **提醒**\n\n"
+                        "【开发经理】⏰ **提醒**\n\n"
                         f"已等待超过 {settings.clarification_reminder_hours} 小时，"
                         "请及时回复确认问题，或回复「需求确认完毕」以继续开发流程。\n"
                         f"超时未回复（{settings.clarification_suspend_days} 天）将自动暂停项目。",
@@ -431,52 +468,64 @@ class WorkflowPipeline:
         evaluation_prompt = f"""
 ## 🔍 需求澄清评估 — Issue #{issue_number}
 
-你之前已经在 GitHub 上创建了父 Issue #{issue_number} 并提出了确认问题。
-用户现在已经在评论区回复了。
+用户已在 GitHub Issue #{issue_number} 评论区回复了你的确认问题。
 
-### 你的任务
+### 强制执行步骤（按顺序）
 
-1. 使用 `get_issue` 或 `get_issue_comments` 读取 Issue #{issue_number} 的内容和最新评论
-2. 仔细分析用户的回复，逐条对照你之前提出的确认问题
-3. 判断所有确认问题是否已得到明确、无歧义的答复
+**步骤 1**：调用 `get_issue_comments` 读取 Issue #{issue_number} 的最新评论。
 
-4. 根据判断结果执行:
+**步骤 2**：逐条对照你之前提出的确认问题，分析用户回复是否明确。
 
-   **情况 A — 所有问题已明确 + 用户表达了确认:**
-   （用户回复了「需求确认完毕」「可以开始开发」「没问题」「确认」等明确确认词）
-   → 调用 `add_labels_to_issue` 为 Issue #{issue_number} 添加 `status/confirmed` 标签
-   → 调用 `remove_labels_from_issue` 从 Issue #{issue_number} 移除 `status/needs-clarification` 和 `type/question` 标签
-   → 调用 `comment_on_issue` 在 Issue #{issue_number} 发表评论：
-     「✅ 需求已确认，可以开始开发。」
+**步骤 3**：根据分析结果，**必须调用工具执行以下操作之一**：
 
-   **情况 B — 仍有未明确的问题:**
-   → 调用 `comment_on_issue` 在 Issue #{issue_number} 发表追问评论
-   → 只追问尚未明确的问题，逐条列出（Q1, Q2, ...）
-   → 保持现有标签不变
+  ✅ **如果所有问题已获得明确答复**（用户逐条回复了你的每个 Q 问题，且内容清晰无歧义）：
+     → 调用 `add_labels_to_issue`(#{issue_number}, ["status/confirmed"])
+     → 调用 `remove_labels_from_issue`(#{issue_number}, ["status/needs-clarification", "type/question"])
+     → 调用 `comment_on_issue`(#{issue_number}, "【开发经理】✅ 需求已确认，可以开始开发。")
 
-### 原始需求回顾
+  📝 **如果有任何问题未被回复或答案模糊**：
+     → **必须调用** `comment_on_issue`(#{issue_number}, "你的追问内容...")
+     → 只追问**未被明确回答**的问题，用 Q 编号标注
+     → 不要说「我将追问」，必须实际调用工具
+
+### 原始需求
 {requirement}
 
-### ⚠️ 重要规则
-- 这是一个**需求澄清评估**任务，不是重新开始需求澄清
-- **绝对不要**创建任何子 Issue
-- **绝对不要**进入开发流程或拆解任务
-- 只关注用户的回复是否明确了所有确认问题
-- 如果用户部分回答了问题但还有遗漏，只追问遗漏的部分
+### 关键规则
+- ⛔ **必须使用工具函数**，不要只用文字描述
+- ⛔ 绝对不要创建子 Issue
+- ⛔ 绝对不要进入开发流程
+- 📌 用户逐条回答了 Q5~Q21，只要每条都有明确内容就应确认通过
+- 📌 用户不需要说「确认完毕」才算确认——逐条明确回复即视为已回答
 """
+
+        # 记录评估前的评论数，用于检测经理是否实际发布了评论
+        comments_before = len(github_tools._get_issue_comments_raw(issue_number))
 
         manager = create_manager_agent()
         try:
             await Console(manager.run_stream(task=evaluation_prompt))
         except Exception as e:
             logger.error(f"经理评估对话失败（API 错误）: {e}")
-            # API 出错时保守处理：检查标签状态，未确认则返回 False 继续等待
-            # 这样不会因为临时网络问题中断整个流程
             confirmed = github_tools.issue_has_label(issue_number, "status/confirmed")
             return confirmed
 
         # 检查经理是否已添加 confirmed 标签
         confirmed = github_tools.issue_has_label(issue_number, "status/confirmed")
+
+        # 安全检查：如果既没确认也没发布新评论，兜底发一条
+        if not confirmed:
+            comments_after = len(github_tools._get_issue_comments_raw(issue_number))
+            if comments_after <= comments_before:
+                logger.warning("经理未确认且未发布评论，兜底发送追问提示")
+                try:
+                    github_tools.comment_on_issue(
+                        issue_number,
+                        "【开发经理】📝 已收到你的回复。请确认是否所有问题都已明确？"
+                        "如有遗漏请补充，如已全部确认请回复「可以开始开发」。",
+                    )
+                except Exception:
+                    pass
 
         if confirmed:
             logger.info(f"✅ 开发经理已确认 Issue #{issue_number} 的需求")
@@ -641,7 +690,7 @@ class WorkflowPipeline:
             try:
                 github_tools.comment_on_issue(
                     self.parent_issue_number,
-                    f"## 📊 项目总结\n\n"
+                    f"【开发经理】## 📊 项目总结\n\n"
                     f"- 总迭代次数: {self.iteration_count}\n"
                     f"- 总耗时: {datetime.now() - self.start_time if self.start_time else 'N/A'}\n"
                     f"- 原始需求: {self.original_requirement[:200]}...\n"
@@ -649,7 +698,7 @@ class WorkflowPipeline:
                 )
                 github_tools.close_issue(
                     self.parent_issue_number,
-                    comment="✅ 项目需求已全部完成，关闭父 Issue。",
+                    comment="【开发经理】✅ 项目需求已全部完成，关闭父 Issue。",
                 )
                 logger.info(f"📝 父 Issue #{self.parent_issue_number} 已关闭")
             except Exception as e:
